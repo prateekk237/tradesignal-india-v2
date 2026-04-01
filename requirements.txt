@@ -1,0 +1,40 @@
+# FastAPI + Server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+websockets>=12.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.25
+asyncpg>=0.29.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.9
+
+# Task Queue
+celery[redis]>=5.3.6
+redis>=5.0.1
+
+# Stock Data
+yfinance>=0.2.36
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Technical Analysis
+ta>=0.11.0
+
+# Sentiment
+vaderSentiment>=3.3.2
+textblob>=0.18.0
+feedparser>=6.0.0
+
+# AI / LLM
+openai>=1.12.0
+
+# Telegram
+python-telegram-bot>=20.7
+
+# Utilities
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+httpx>=0.26.0
+structlog>=24.1.0
