@@ -546,31 +546,33 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_scanstock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scan a single stock on demand. Usage: /scanstock RELIANCE"""
+    """Smart scan — auto-analyzes all timeframes, recommends hold duration.
+    Usage: /scanstock RELIANCE"""
     args = context.args
     if not args:
         await update.message.reply_text(
-            "Usage: /scanstock RELIANCE [weekly|monthly]\n"
-            "Example: /scanstock SBI monthly\n"
-            "         /scanstock SUZLON\n"
-            "         /scanstock RTN",
+            "🔍 <b>Smart Stock Scanner</b>\n\n"
+            "Usage: /scanstock RELIANCE\n"
+            "       /scanstock SBI\n"
+            "       /scanstock SUZLON\n\n"
+            "Auto-analyzes weekly + monthly + trend\n"
+            "and tells you the best holding duration.",
             parse_mode="HTML",
         )
         return
 
     query = args[0].upper()
-    mode = args[1].lower() if len(args) > 1 and args[1].lower() in ("weekly", "monthly") else "weekly"
 
     from app.engine.stock_universe import resolve_ticker
     ticker = resolve_ticker(query)
     if not ticker:
-        await update.message.reply_text(f"❌ Stock '{query}' not found. Try /stock {query} for suggestions.")
+        await update.message.reply_text(f"❌ Stock '{query}' not found. Try /stock {query}")
         return
 
     info = STOCK_UNIVERSE[ticker]
     await update.message.reply_text(
-        f"🔍 Scanning <b>{ticker.replace('.NS','')}</b> ({info['name']})...\n"
-        f"Mode: {mode} | AI: ON\nThis takes 30-60 seconds.",
+        f"🔍 Smart scanning <b>{ticker.replace('.NS','')}</b> ({info['name']})...\n"
+        f"Analyzing weekly + monthly + long-term trend...\nThis takes 30-90 seconds.",
         parse_mode="HTML",
     )
 
@@ -578,41 +580,89 @@ async def cmd_scanstock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def _scan_and_reply():
         try:
-            from app.engine.scanner import analyze_single_stock, fetch_nifty_data
+            from app.engine.scanner import analyze_single_stock, fetch_stock_data, fetch_nifty_data, _safe_float
             from app.sentiment.analyzer import fetch_news_from_rss
             from app.tasks.auto_scheduler import _send_telegram_alert
 
             news = fetch_news_from_rss(max_articles=30)
             nifty = fetch_nifty_data()
-            result = analyze_single_stock(ticker, info, news, nifty_df=nifty, mode=mode, use_ai=True)
 
-            if not result:
-                _send_telegram_alert(f"❌ Could not analyze {ticker.replace('.NS','')}. Insufficient Yahoo Finance data.")
+            # Analyze BOTH timeframes
+            weekly = analyze_single_stock(ticker, info, news, nifty_df=nifty, mode="weekly", use_ai=True)
+            monthly = analyze_single_stock(ticker, info, news, nifty_df=nifty, mode="monthly", use_ai=False)
+
+            if not weekly and not monthly:
+                _send_telegram_alert(f"❌ Could not analyze {ticker.replace('.NS','')}. No data.")
                 return
 
-            entry = result.get("entry_exit", {})
+            best = weekly or monthly
+            w_conf = _safe_float(weekly["final_confidence"]) if weekly else 0
+            m_conf = _safe_float(monthly["final_confidence"]) if monthly else 0
+            price = _safe_float(best["current_price"])
+
+            # Check long-term trend
+            df_6m = fetch_stock_data(ticker, period="6mo")
+            trend_score = 0
+            if df_6m is not None and len(df_6m) >= 50:
+                import pandas as pd
+                sma20 = _safe_float(df_6m["Close"].rolling(20).mean().iloc[-1], price)
+                sma50 = _safe_float(df_6m["Close"].rolling(50).mean().iloc[-1], price)
+                if price > sma20: trend_score += 1
+                if price > sma50: trend_score += 1
+                if sma20 > sma50: trend_score += 1
+                if len(df_6m) >= 100:
+                    sma100 = _safe_float(df_6m["Close"].rolling(100).mean().iloc[-1], price)
+                    if price > sma100: trend_score += 1
+
+            # Smart hold recommendation
+            if w_conf >= 70 and m_conf >= 65 and trend_score >= 3:
+                hold = "📅 2-4 weeks"
+                reason = "Strong short + long-term momentum"
+            elif m_conf >= 65 and trend_score >= 3:
+                hold = "📅 1-2 months"
+                reason = "Monthly signal strong, uptrend intact"
+            elif trend_score >= 4 and m_conf >= 55:
+                hold = "📅 3-6 months"
+                reason = "Strong long-term uptrend"
+            elif w_conf >= 65:
+                hold = "📅 1-2 weeks"
+                reason = "Short-term setup only"
+            elif m_conf >= 60:
+                hold = "📅 2-4 weeks"
+                reason = "Moderate monthly signal"
+            else:
+                hold = "⏳ WAIT — no clear entry"
+                reason = "Weak signals, avoid for now"
+
+            use_r = monthly if m_conf > w_conf else weekly
+            if not use_r:
+                use_r = best
+            entry = use_r.get("entry_exit", {})
             target = entry.get("target_price")
             sl = entry.get("stop_loss")
             target_str = f"₹{target:,.2f}" if target else "N/A"
             sl_str = f"₹{sl:,.2f}" if sl else "N/A"
             profit_pct = entry.get("potential_profit_pct", 0) or 0
             rr = entry.get("risk_reward", 0) or 0
+            news_sent = best.get("news_sentiment", {}).get("overall_sentiment", "N/A")
 
-            emoji = "🟢" if "STRONG" in result["final_signal"] else "🔵" if "BUY" in result["final_signal"] else "🟡" if "HOLD" in result["final_signal"] else "🔴"
-            news_sent = result.get("news_sentiment", {}).get("overall_sentiment", "N/A")
+            emoji = "🟢" if "STRONG" in use_r["final_signal"] else "🔵" if "BUY" in use_r["final_signal"] else "🟡" if "HOLD" in use_r["final_signal"] else "🔴"
+            trend_label = "Strong ↑" if trend_score >= 3 else "Moderate →" if trend_score >= 2 else "Weak ↓"
 
             msg = (
-                f"📊 <b>Single Stock Scan: {ticker.replace('.NS','')}</b>\n"
+                f"📊 <b>Smart Scan: {ticker.replace('.NS','')}</b> — {info['name']}\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"{emoji} Signal: <b>{result['final_signal']}</b> ({result['final_confidence']:.0f}%)\n"
-                f"💰 Price: ₹{result['current_price']:,.2f}\n"
+                f"💰 Price: ₹{price:,.2f} | {info['sector']} | {info['cap']}\n\n"
+                f"{emoji} Signal: <b>{use_r['final_signal']}</b> ({use_r['final_confidence']:.0f}%)\n"
                 f"🎯 Target: {target_str} (+{profit_pct:.1f}%)\n"
                 f"🛑 Stop Loss: {sl_str}\n"
-                f"⚖️ Risk:Reward = 1:{rr:.1f}\n"
-                f"📰 News: {news_sent} ({result['news_modifier']:+.1f})\n"
-                f"🤖 AI: {result['ai_modifier']:+.1f}\n"
-                f"📈 Mode: {mode}\n"
-                f"\nBase: {result['base_confidence']:.0f}% → Final: {result['final_confidence']:.0f}%"
+                f"⚖️ R:R = 1:{rr:.1f}\n\n"
+                f"🕐 <b>Recommended Hold: {hold}</b>\n"
+                f"   {reason}\n\n"
+                f"📈 Weekly: {weekly['final_signal'] if weekly else 'N/A'} ({w_conf:.0f}%)\n"
+                f"📈 Monthly: {monthly['final_signal'] if monthly else 'N/A'} ({m_conf:.0f}%)\n"
+                f"📈 Trend: {trend_label} ({trend_score}/4)\n"
+                f"📰 News: {news_sent}\n"
             )
             _send_telegram_alert(msg)
         except Exception as e:

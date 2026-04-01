@@ -33,7 +33,7 @@ export default function Scan() {
     setSingleError('');
     setSingleResult(null);
     try {
-      const data = await scanSingleStock(singleTicker.trim(), singleMode, store.useAI);
+      const data = await scanSingleStock(singleTicker.trim(), 'weekly', store.useAI);
       setSingleResult(data);
     } catch (e: any) {
       setSingleError(e.response?.data?.detail || e.message || 'Scan failed');
@@ -129,20 +129,13 @@ export default function Scan() {
           Scan Single Stock
         </h3>
         <div className="flex flex-wrap gap-3 items-end">
-          <div className="flex-1 min-w-[160px]">
+          <div className="flex-1 min-w-[200px]">
             <label className="text-[11px] text-white/40 uppercase tracking-wider block mb-1">Stock Name / Ticker</label>
             <input type="text" value={singleTicker}
               onChange={e => setSingleTicker(e.target.value.toUpperCase())}
               onKeyDown={e => e.key === 'Enter' && doSingleScan()}
-              placeholder="e.g. SUZLON, SBI, RTN, NALCO"
+              placeholder="e.g. SUZLON, SBI, RTN, NALCO, RPOWER"
               className="input-dark" />
-          </div>
-          <div className="w-[130px]">
-            <label className="text-[11px] text-white/40 uppercase tracking-wider block mb-1">Mode</label>
-            <select value={singleMode} onChange={e => setSingleMode(e.target.value)} className="select-dark">
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
           </div>
           <button onClick={doSingleScan} disabled={singleLoading || !singleTicker.trim()}
             className="btn-primary px-5 py-2.5 flex items-center gap-2 disabled:opacity-40">
@@ -150,6 +143,7 @@ export default function Scan() {
             Analyze
           </button>
         </div>
+        <p className="text-[10px] text-white/25 mt-1">Auto-analyzes all timeframes and recommends best holding duration</p>
 
         {singleError && <p className="text-red-400 text-sm mt-3">{singleError}</p>}
 
@@ -182,6 +176,36 @@ export default function Scan() {
             {singleResult.ai_data?.ai_analysis && (
               <div className="mt-3 p-3 rounded-lg bg-violet-500/5 border border-violet-500/10 text-sm text-white/70">
                 <span className="text-violet-400 text-xs font-medium">AI Analysis:</span> {singleResult.ai_data.ai_analysis}
+              </div>
+            )}
+            {singleResult.recommendation && (
+              <div className="mt-3 p-4 rounded-xl bg-gradient-to-r from-accent-cyan/5 to-violet-500/5 border border-accent-cyan/20">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-accent-cyan font-semibold text-sm">Recommended Hold Duration</span>
+                  <span className={cn('text-lg font-bold',
+                    singleResult.recommendation.hold_duration.includes('WAIT') ? 'text-red-400' : 'text-green-400'
+                  )}>
+                    {singleResult.recommendation.hold_duration}
+                  </span>
+                </div>
+                <p className="text-xs text-white/50 mb-3">{singleResult.recommendation.reason}</p>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div className="bg-white/[0.03] rounded-lg p-2 text-center">
+                    <div className="text-white/30">Weekly</div>
+                    <div className="font-mono font-bold text-white">{singleResult.recommendation.weekly_signal}</div>
+                    <div className="text-white/40">{singleResult.recommendation.weekly_confidence}%</div>
+                  </div>
+                  <div className="bg-white/[0.03] rounded-lg p-2 text-center">
+                    <div className="text-white/30">Monthly</div>
+                    <div className="font-mono font-bold text-white">{singleResult.recommendation.monthly_signal}</div>
+                    <div className="text-white/40">{singleResult.recommendation.monthly_confidence}%</div>
+                  </div>
+                  <div className="bg-white/[0.03] rounded-lg p-2 text-center">
+                    <div className="text-white/30">Trend</div>
+                    <div className="font-mono font-bold text-white">{singleResult.recommendation.trend_label}</div>
+                    <div className="text-white/40">{singleResult.recommendation.trend_score}/4</div>
+                  </div>
+                </div>
               </div>
             )}
           </div>

@@ -50,7 +50,7 @@ export const checkHealth = () =>
 
 // ── Single Stock Scan ─────────────────────────────────────
 export const scanSingleStock = (ticker: string, mode = 'weekly', useAI = true) =>
-  api.get(`/api/scan/stock/${ticker}`, { params: { mode, use_ai: useAI } }).then(r => r.data);
+  api.get(`/api/scan/stock/${ticker}`, { params: { use_ai: useAI } }).then(r => r.data);
 
 // ── Budget Picks ──────────────────────────────────────────
 export const fetchBudgetPicks = (budget = 20000, mode = 'weekly', maxPrice = 500) =>

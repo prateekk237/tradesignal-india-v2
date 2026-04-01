@@ -520,56 +520,111 @@ async def allocate_portfolio(request: PortfolioAllocRequest):
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/scan/stock/{ticker_query}")
-async def scan_single_stock(ticker_query: str, mode: str = "weekly", use_ai: bool = True):
-    """Scan a single stock by ticker or short name. E.g., /api/scan/stock/RELIANCE"""
-    from app.engine.scanner import analyze_single_stock, fetch_stock_data, fetch_nifty_data
+async def scan_single_stock(ticker_query: str, use_ai: bool = True):
+    """Smart single stock scan — auto-analyzes ALL timeframes and recommends best holding period."""
+    from app.engine.scanner import analyze_single_stock, fetch_stock_data, fetch_nifty_data, _safe_float
     from app.sentiment.analyzer import fetch_news_from_rss
 
     ticker = _resolve_ticker(ticker_query)
     if not ticker:
-        raise HTTPException(status_code=404, detail=f"Stock '{ticker_query}' not found. Try full name like RELIANCE, SUZLON, SBI.")
+        raise HTTPException(status_code=404, detail=f"Stock '{ticker_query}' not found. Try: RELIANCE, SUZLON, SBI, NALCO, RTN")
 
     info = STOCK_UNIVERSE[ticker]
 
-    # Check if Yahoo Finance has data for this ticker first
     try:
         test_df = fetch_stock_data(ticker, period="1mo")
         if test_df is None or len(test_df) < 10:
-            raise HTTPException(
-                status_code=422,
-                detail=f"{ticker.replace('.NS','')} has insufficient price data on Yahoo Finance ({len(test_df) if test_df is not None else 0} days). Stock may be newly listed or delisted."
-            )
+            raise HTTPException(status_code=422, detail=f"{ticker.replace('.NS','')} has insufficient data ({len(test_df) if test_df is not None else 0} days).")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Cannot fetch data for {ticker.replace('.NS','')}: {str(e)[:150]}")
+        raise HTTPException(status_code=422, detail=f"Cannot fetch {ticker.replace('.NS','')}: {str(e)[:150]}")
 
     try:
         news_articles = fetch_news_from_rss(max_articles=30)
         nifty_df = fetch_nifty_data()
 
-        result = analyze_single_stock(ticker, info, news_articles, nifty_df=nifty_df, mode=mode, use_ai=use_ai)
-        if not result:
-            raise HTTPException(status_code=422, detail=f"Analysis returned no results for {ticker.replace('.NS','')}. Try a different stock.")
+        # ── Analyze BOTH timeframes ──
+        weekly_result = analyze_single_stock(ticker, info, news_articles, nifty_df=nifty_df, mode="weekly", use_ai=use_ai)
+        monthly_result = analyze_single_stock(ticker, info, news_articles, nifty_df=nifty_df, mode="monthly", use_ai=False)
+
+        if not weekly_result and not monthly_result:
+            raise HTTPException(status_code=422, detail=f"Analysis returned no results for {ticker.replace('.NS','')}.")
+
+        best = weekly_result or monthly_result
+        weekly_conf = _safe_float(weekly_result["final_confidence"]) if weekly_result else 0
+        monthly_conf = _safe_float(monthly_result["final_confidence"]) if monthly_result else 0
+
+        # ── Smart holding recommendation ──
+        price = _safe_float(best["current_price"])
+        df_6m = fetch_stock_data(ticker, period="6mo")
+        trend_score = 0
+        if df_6m is not None and len(df_6m) >= 50:
+            sma50 = df_6m["Close"].rolling(50).mean().iloc[-1]
+            sma20 = df_6m["Close"].rolling(20).mean().iloc[-1]
+            sma200 = df_6m["Close"].rolling(200).mean().iloc[-1] if len(df_6m) >= 200 else sma50
+            if price > _safe_float(sma20): trend_score += 1
+            if price > _safe_float(sma50): trend_score += 1
+            if _safe_float(sma20) > _safe_float(sma50): trend_score += 1
+            if price > _safe_float(sma200): trend_score += 1
+            # Monthly return momentum
+            monthly_ret = _safe_float((price / _safe_float(df_6m["Close"].iloc[-21], price) - 1) * 100) if len(df_6m) > 21 else 0
+            three_month_ret = _safe_float((price / _safe_float(df_6m["Close"].iloc[-63], price) - 1) * 100) if len(df_6m) > 63 else 0
+
+        # Determine best holding period
+        if weekly_conf >= 70 and monthly_conf >= 65 and trend_score >= 3:
+            recommended_hold = "2-4 weeks"
+            hold_reason = "Strong short-term momentum + positive longer trend"
+        elif monthly_conf >= 65 and trend_score >= 3:
+            recommended_hold = "1-2 months"
+            hold_reason = "Monthly signals stronger, uptrend intact"
+        elif trend_score >= 4 and monthly_conf >= 55:
+            recommended_hold = "3-6 months"
+            hold_reason = "Strong long-term uptrend (above all MAs)"
+        elif weekly_conf >= 65:
+            recommended_hold = "1-2 weeks"
+            hold_reason = "Short-term setup only, no long-term trend support"
+        elif monthly_conf >= 60:
+            recommended_hold = "2-4 weeks"
+            hold_reason = "Moderate monthly signal"
+        else:
+            recommended_hold = "WAIT — no clear entry"
+            hold_reason = "Weak signals across all timeframes"
+
+        use_result = monthly_result if monthly_conf > weekly_conf else weekly_result
+        if not use_result:
+            use_result = best
 
         return {
-            "ticker": result["ticker"],
-            "name": result["name"],
-            "sector": result["sector"],
-            "cap": result["cap"],
-            "current_price": result["current_price"],
-            "final_confidence": result["final_confidence"],
-            "final_signal": result["final_signal"],
-            "base_confidence": result["base_confidence"],
-            "news_modifier": result["news_modifier"],
-            "ai_modifier": result["ai_modifier"],
-            "entry_exit": result["entry_exit"],
-            "sr_levels": result["sr_levels"],
-            "indicator_scores": result["signal_data"]["details"],
-            "news_sentiment": result["news_sentiment"],
-            "ai_data": result["ai_data"],
-            "holding_mode": result["holding_mode"],
-            "technical_details": result["technical_details"],
+            "ticker": best["ticker"],
+            "name": best["name"],
+            "sector": best["sector"],
+            "cap": best["cap"],
+            "current_price": best["current_price"],
+            # Best timeframe result
+            "final_confidence": use_result["final_confidence"],
+            "final_signal": use_result["final_signal"],
+            "base_confidence": use_result["base_confidence"],
+            "news_modifier": use_result["news_modifier"],
+            "ai_modifier": use_result["ai_modifier"],
+            "entry_exit": use_result["entry_exit"],
+            "sr_levels": use_result["sr_levels"],
+            "indicator_scores": use_result["signal_data"]["details"],
+            "news_sentiment": use_result["news_sentiment"],
+            "ai_data": use_result["ai_data"],
+            "holding_mode": use_result["holding_mode"],
+            "technical_details": use_result["technical_details"],
+            # ── Smart recommendation ──
+            "recommendation": {
+                "hold_duration": recommended_hold,
+                "reason": hold_reason,
+                "weekly_confidence": round(weekly_conf, 1),
+                "weekly_signal": weekly_result["final_signal"] if weekly_result else "N/A",
+                "monthly_confidence": round(monthly_conf, 1),
+                "monthly_signal": monthly_result["final_signal"] if monthly_result else "N/A",
+                "trend_score": trend_score,
+                "trend_label": "Strong ↑" if trend_score >= 3 else "Moderate →" if trend_score >= 2 else "Weak ↓",
+            },
         }
     except HTTPException:
         raise
