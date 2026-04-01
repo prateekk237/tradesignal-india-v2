@@ -39,6 +39,21 @@ def _safe_float(val, default=0.0) -> float:
         return default
 
 
+def get_live_price(ticker: str) -> float:
+    """Get the real-time live price from Yahoo Finance ticker.info.
+    Falls back to last historical close if live price unavailable."""
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        # Try multiple fields for live price
+        live = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+        if live and not pd.isna(live) and live > 0:
+            return round(float(live), 2)
+    except Exception:
+        pass
+    return 0.0
+
+
 def fetch_stock_data(ticker: str, period: str = "3mo") -> pd.DataFrame:
     """Fetch OHLCV data from Yahoo Finance with caching.
     Always returns clean data — no NaN, no incomplete rows.
@@ -122,6 +137,11 @@ def analyze_single_stock(ticker: str, stock_info: dict, news_articles: list,
     # 8. Build stock data for AI analysis
     latest = df.iloc[-1]
     current_price = _safe_float(latest["Close"])
+
+    # ── Get LIVE price (real-time) instead of stale historical close ──
+    live_price = get_live_price(ticker)
+    if live_price > 0:
+        current_price = live_price
 
     # Safety: if price is still 0 after cleaning, use second-to-last row
     if current_price <= 0 and len(df) > 1:
